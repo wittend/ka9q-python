@@ -1,6 +1,12 @@
 # Changelog
 
-## [3.3.0] - 2026-01-10
+## [3.4.1] - 2026-01-27
+
+### Fixed
+
+- **Stable SSRC Allocation**: Replaced unstable Python `hash()` with `hashlib.sha256` in `allocate_ssrc()`. This ensure SSRCs remain consistent across process restarts, allowing `radiod` to reuse existing receivers and preventing resource exhaustion.
+
+## [3.4.0] - 2026-01-13
 
 ### Added
 
