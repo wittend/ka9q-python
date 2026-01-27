@@ -25,6 +25,7 @@ import struct
 import secrets
 import logging
 import threading
+import hashlib
 import re
 import time
 from dataclasses import dataclass, field
@@ -100,18 +101,25 @@ def allocate_ssrc(
         >>> ssrc2 = allocate_ssrc(10.0e6, "iq", 16000)
         >>> assert ssrc == ssrc2
     """
-    # Match signal-recorder's StreamSpec.__hash__() algorithm
-    key = (
-        round(frequency_hz),      # Frequency rounded to nearest Hz
-        preset.lower(),           # Preset normalized to lowercase
-        sample_rate,              # Sample rate as-is
-        agc,                      # AGC boolean
-        round(gain, 1),           # Gain rounded to 0.1 dB
-        destination,              # Destination address (None or string)
-        encoding                  # Encoding type (int)
+    # Create a stable string key from parameters
+    # The format and rounding match signal-recorder's StreamSpec hash logic.
+    key_str = (
+        f"{round(frequency_hz)}|"      # Frequency rounded to nearest Hz
+        f"{preset.lower()}|"           # Preset normalized to lowercase
+        f"{sample_rate}|"              # Sample rate
+        f"{'1' if agc else '0'}|"      # AGC as 1/0
+        f"{round(gain, 1)}|"           # Gain rounded to 0.1 dB
+        f"{destination or ''}|"        # Destination (empty string if None)
+        f"{encoding}"                  # Encoding type
     )
-    # Keep positive, 31 bits (matches signal-recorder)
-    return hash(key) & 0x7FFFFFFF
+    
+    # Use SHA-256 for a stable, platform-independent hash
+    h = hashlib.sha256(key_str.encode()).digest()
+    
+    # Convert first 4 bytes to integer (big-endian)
+    # Keep positive and 31 bits to match signal-recorder's SSRC range
+    ssrc_full = int.from_bytes(h[:4], byteorder='big')
+    return ssrc_full & 0x7FFFFFFF
 
 
 # Input validation functions
