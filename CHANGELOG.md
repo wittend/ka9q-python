@@ -1,5 +1,23 @@
 # Changelog
 
+## [3.4.2] - 2026-02-05
+
+### Added
+
+- **Comprehensive Getting Started Guide**: Added a new `docs/GETTING_STARTED.md` file. This guide provides a step-by-step tutorial for new users, covering installation, a simple first program, core concepts, and troubleshooting tips. It is now the recommended entry point for new users.
+- **Examples README**: Added a new `examples/README.md` file to organize the examples directory. It categorizes examples by complexity (basic, intermediate, advanced) and provides a recommended learning path, making it easier for users to find relevant examples.
+
+### Fixed
+
+- **`stream_example.py` Bug**: Fixed a critical bug in `examples/stream_example.py` where the code incorrectly iterated over the dictionary returned by `discover_channels`. The example now correctly accesses `ChannelInfo` objects, preventing an `AttributeError` and allowing the example to run as intended.
+
+### Changed
+
+- **Updated API Documentation**: The documentation for `create_channel` in `docs/API_REFERENCE.md` has been updated to match the actual implementation. This includes adding the `destination` and `encoding` parameters, correcting the parameter order, and documenting the return type (`int` SSRC).
+- **Updated README**: The main `README.md` has been updated to link to the new Getting Started guide.
+
+---
+
 ## [3.4.1] - 2026-01-27
 
 ### Fixed
