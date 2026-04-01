@@ -2,6 +2,12 @@
 include README.md
 include LICENSE
 include SUMMARY.md
+
+# Include protocol compatibility pin
+include ka9q_radio_compat
+
+# Include sync tooling
+recursive-include scripts *.py
 include TUNE_IMPLEMENTATION.md
 include NATIVE_DISCOVERY.md
 include CROSS_PLATFORM_SUPPORT.md

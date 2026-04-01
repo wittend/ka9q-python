@@ -2407,37 +2407,42 @@ class RadiodControl:
         logger.info(f"Setting Opus FEC for SSRC {ssrc}: {loss_percent}% expected loss")
         self.send_command(cmdbuffer)
     
-    def set_packet_buffering(self, ssrc: int, min_blocks: int):
+    def set_max_delay(self, ssrc: int, max_blocks: int):
         """
-        Set minimum packet buffering (0-4 blocks)
+        Set maximum allowable aggregation delay in blocks (0-5)
         
-        Controls how many blocks to buffer before sending a packet.
+        Controls how many blocks radiod may aggregate before sending a packet.
         Higher values reduce packet rate but increase latency.
         
         Args:
             ssrc: SSRC of the channel
-            min_blocks: Minimum blocks (0-4). At 20ms/block: 0=no minimum, 4=80ms minimum
+            max_blocks: Maximum delay in blocks (0-5). At 20ms/block: 0=immediate, 5=100ms
         
         Raises:
-            ValidationError: If min_blocks is not 0-4
+            ValidationError: If max_blocks is not 0-5
         
         Example:
-            >>> control.set_packet_buffering(ssrc=12345, min_blocks=2)  # 40ms minimum
+            >>> control.set_max_delay(ssrc=12345, max_blocks=2)  # up to 40ms
         """
         _validate_ssrc(ssrc)
-        if not (0 <= min_blocks <= 4):
-            raise ValidationError(f"min_blocks must be 0-4, got {min_blocks}")
+        if not (0 <= max_blocks <= 5):
+            raise ValidationError(f"max_blocks must be 0-5, got {max_blocks}")
         
         cmdbuffer = bytearray()
         cmdbuffer.append(CMD)
         
-        encode_int(cmdbuffer, StatusType.MINPACKET, min_blocks)
+        encode_int(cmdbuffer, StatusType.MAXDELAY, max_blocks)
         encode_int(cmdbuffer, StatusType.OUTPUT_SSRC, ssrc)
         encode_int(cmdbuffer, StatusType.COMMAND_TAG, secrets.randbits(31))
         encode_eol(cmdbuffer)
         
-        logger.info(f"Setting packet buffering for SSRC {ssrc}: {min_blocks} blocks")
+        logger.info(f"Setting max delay for SSRC {ssrc}: {max_blocks} blocks")
         self.send_command(cmdbuffer)
+    
+    # Backward compatibility alias
+    def set_packet_buffering(self, ssrc: int, min_blocks: int):
+        """Deprecated: use set_max_delay() instead."""
+        self.set_max_delay(ssrc, min_blocks)
     
     def set_filter2(self, ssrc: int, blocksize: int, kaiser_beta: Optional[float] = None):
         """

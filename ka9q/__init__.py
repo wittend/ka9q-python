@@ -56,7 +56,7 @@ Lower-level usage (explicit control):
         )
         print(f"Created channel with SSRC: {ssrc}")
 """
-__version__ = '3.4.2'
+__version__ = '3.5.0'
 __author__ = 'Michael Hauan AC0G'
 
 from .control import RadiodControl, allocate_ssrc
@@ -147,3 +147,4 @@ __all__ = [
 
 from .addressing import generate_multicast_ip
 from .monitor import ChannelMonitor
+from .compat import KA9Q_RADIO_COMMIT
