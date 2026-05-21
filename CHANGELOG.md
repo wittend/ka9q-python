@@ -1,5 +1,51 @@
 # Changelog
 
+## [3.15.0] - 2026-05-21
+
+### Added
+
+- **F16LE / F16BE RTP payload decoding** in `parse_rtp_samples` for radiod's
+  float16 output mode (encodings 6 and 9).  Both audio and IQ paths.
+- **G.711 µ-law / A-law decoders** for encodings 10 and 11 — pure-numpy
+  table-based, no `audioop` dependency (which was removed in Python 3.13).
+- **`OpusDecoder` class** in `ka9q.stream` for OPUS / OPUS_VOIP payloads
+  (encodings 3 and 7).  Lazy-imports `opuslib`; install via
+  `pip install ka9q-python[opus]`.  Maintains codec state across calls so
+  packet-loss concealment works end-to-end — one instance per stream SSRC.
+- New `opus` optional dependency in `pyproject.toml` (`opuslib>=3.0`).
+
+### Fixed
+
+- **`RadiodControl.set_agc(attack_rate=...)` was unreachable.**  It encoded
+  `StatusType.AGC_ATTACK_RATE`, which does not exist in ka9q-radio's
+  `status.h` or in `ka9q/types.py` — any call passing `attack_rate=` raised
+  `AttributeError`.  Replaced with a working `threshold:` kwarg backed by
+  `AGC_THRESHOLD` (which radiod actually decodes in
+  `decode_radio_commands()`).
+- **Removed 6 stale duplicate `set_*` methods.**  In a single class, second
+  defs silently shadow firsts — so callers were already using the correct
+  versions further down the file.  The dead first defs of `set_squelch`,
+  `set_pll`, `set_output_channels`, `set_independent_sideband`,
+  `set_envelope_detection`, and `set_opus_bitrate` are gone.  One of them
+  (`set_opus_bitrate`) referenced a non-existent `StatusType.OPUS_BITRATE`
+  — the working second def uses the correct `OPUS_BIT_RATE`.
+
+### Tooling / pinning
+
+- Pin advanced from ka9q-radio `f78cff9c` (1.0.0-22) to `d555f1853422`.
+  Drift report confirms zero TLV-tag, encoding-enum, demod-type, or
+  window-type changes across the 68 intervening upstream commits — only
+  packaging, hydrasdr-driver, and internal C-struct refactors.  Existing
+  ka9q-python state (`types.py`, `decode_status_packet`, `SpectrumStream`,
+  every `set_*` method) was already covering the full HEAD protocol
+  surface; this release brings the recorded compatibility tag in line.
+
+### Tests
+
+- Fixed pre-existing `tests/test_filter_edges.py::_bare_control` helper
+  that did not initialise the `client_id` attribute added with v3.14.0
+  per-(client,radiod) multicast destinations.
+
 ## [3.14.2] - 2026-05-14
 
 ### Added

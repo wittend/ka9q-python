@@ -973,23 +973,27 @@ class RadiodControl:
         logger.info(f"Setting sample rate for SSRC {ssrc} to {sample_rate} Hz")
         self.send_command(cmdbuffer)
     
-    def set_agc(self, ssrc: int, enable: bool, hangtime: Optional[float] = None, 
+    def set_agc(self, ssrc: int, enable: bool, hangtime: Optional[float] = None,
                 headroom: Optional[float] = None, recovery_rate: Optional[float] = None,
-                attack_rate: Optional[float] = None):
+                threshold: Optional[float] = None):
         """
-        Configure AGC (Automatic Gain Control) for a channel
-        
+        Configure AGC (Automatic Gain Control) for a channel.
+
+        radiod exposes four AGC knobs: enable, hangtime, headroom, recovery_rate,
+        and threshold. There is no separate "attack rate" — see radio_status.c
+        decode_radio_commands().
+
         Args:
             ssrc: SSRC of the channel
             enable: Enable/disable AGC (True=enabled, False=manual gain)
-            hangtime: AGC hang time in seconds (optional)
-            headroom: Target headroom in dB (optional)
-            recovery_rate: AGC recovery rate (optional)
-            attack_rate: AGC attack rate (optional)
+            hangtime: AGC hang time in seconds
+            headroom: Target headroom in dB (positive; radiod negates internally)
+            recovery_rate: AGC recovery rate in dB/sec
+            threshold: AGC threshold in dB
         """
         cmdbuffer = bytearray()
         cmdbuffer.append(CMD)
-        
+
         encode_int(cmdbuffer, StatusType.AGC_ENABLE, 1 if enable else 0)
         if hangtime is not None:
             encode_float(cmdbuffer, StatusType.AGC_HANGTIME, hangtime)
@@ -997,14 +1001,14 @@ class RadiodControl:
             encode_float(cmdbuffer, StatusType.HEADROOM, headroom)
         if recovery_rate is not None:
             encode_float(cmdbuffer, StatusType.AGC_RECOVERY_RATE, recovery_rate)
-        if attack_rate is not None:
-            encode_float(cmdbuffer, StatusType.AGC_ATTACK_RATE, attack_rate)
-        
+        if threshold is not None:
+            encode_float(cmdbuffer, StatusType.AGC_THRESHOLD, threshold)
+
         encode_int(cmdbuffer, StatusType.OUTPUT_SSRC, ssrc)
         encode_int(cmdbuffer, StatusType.COMMAND_TAG, secrets.randbits(31))
         encode_eol(cmdbuffer)
-        
-        logger.info(f"Setting AGC for SSRC {ssrc}: enable={enable}, hangtime={hangtime}, headroom={headroom}")
+
+        logger.info(f"Setting AGC for SSRC {ssrc}: enable={enable}")
         self.send_command(cmdbuffer)
     
     def set_gain(self, ssrc: int, gain_db: float):
@@ -1710,138 +1714,6 @@ class RadiodControl:
         logger.info(f"Setting LIFETIME for SSRC {ssrc} to {lifetime} frames")
         self.send_command(cmdbuffer)
 
-    def set_squelch(self, ssrc: int, open_threshold: Optional[float] = None,
-                    close_threshold: Optional[float] = None, snr_squelch: Optional[bool] = None):
-        """
-        Set squelch parameters for a channel
-        
-        Args:
-            ssrc: SSRC of the channel
-            open_threshold: Squelch open threshold in dB (optional)
-            close_threshold: Squelch close threshold in dB (optional)
-            snr_squelch: Enable SNR-based squelch (optional)
-        """
-        cmdbuffer = bytearray()
-        cmdbuffer.append(CMD)
-        
-        if open_threshold is not None:
-            encode_float(cmdbuffer, StatusType.SQUELCH_OPEN, open_threshold)
-        if close_threshold is not None:
-            encode_float(cmdbuffer, StatusType.SQUELCH_CLOSE, close_threshold)
-        if snr_squelch is not None:
-            encode_int(cmdbuffer, StatusType.SNR_SQUELCH, 1 if snr_squelch else 0)
-        
-        encode_int(cmdbuffer, StatusType.OUTPUT_SSRC, ssrc)
-        encode_int(cmdbuffer, StatusType.COMMAND_TAG, secrets.randbits(31))
-        encode_eol(cmdbuffer)
-        
-        logger.info(f"Setting squelch for SSRC {ssrc}")
-        self.send_command(cmdbuffer)
-
-    def set_pll(self, ssrc: int, enable: Optional[bool] = None, 
-                bandwidth: Optional[float] = None, square: Optional[bool] = None):
-        """
-        Set PLL parameters for a channel
-        
-        Args:
-            ssrc: SSRC of the channel
-            enable: Enable/disable PLL (optional)
-            bandwidth: PLL bandwidth in Hz (optional)
-            square: Enable square-wave PLL output (optional)
-        """
-        cmdbuffer = bytearray()
-        cmdbuffer.append(CMD)
-        
-        if enable is not None:
-            encode_int(cmdbuffer, StatusType.PLL_ENABLE, 1 if enable else 0)
-        if bandwidth is not None:
-            encode_float(cmdbuffer, StatusType.PLL_BW, bandwidth)
-        if square is not None:
-            encode_int(cmdbuffer, StatusType.PLL_SQUARE, 1 if square else 0)
-        
-        encode_int(cmdbuffer, StatusType.OUTPUT_SSRC, ssrc)
-        encode_int(cmdbuffer, StatusType.COMMAND_TAG, secrets.randbits(31))
-        encode_eol(cmdbuffer)
-        
-        logger.info(f"Setting PLL for SSRC {ssrc}")
-        self.send_command(cmdbuffer)
-
-    def set_output_channels(self, ssrc: int, channels: int):
-        """
-        Set number of output channels (mono/stereo)
-        
-        Args:
-            ssrc: SSRC of the channel
-            channels: Number of channels (1=mono, 2=stereo)
-        """
-        cmdbuffer = bytearray()
-        cmdbuffer.append(CMD)
-        
-        encode_int(cmdbuffer, StatusType.OUTPUT_CHANNELS, channels)
-        encode_int(cmdbuffer, StatusType.OUTPUT_SSRC, ssrc)
-        encode_int(cmdbuffer, StatusType.COMMAND_TAG, secrets.randbits(31))
-        encode_eol(cmdbuffer)
-        
-        logger.info(f"Setting output channels for SSRC {ssrc} to {channels}")
-        self.send_command(cmdbuffer)
-
-    def set_independent_sideband(self, ssrc: int, enable: bool):
-        """
-        Enable/disable independent sideband (ISB) mode
-        
-        Args:
-            ssrc: SSRC of the channel
-            enable: Enable ISB mode
-        """
-        cmdbuffer = bytearray()
-        cmdbuffer.append(CMD)
-        
-        encode_int(cmdbuffer, StatusType.INDEPENDENT_SIDEBAND, 1 if enable else 0)
-        encode_int(cmdbuffer, StatusType.OUTPUT_SSRC, ssrc)
-        encode_int(cmdbuffer, StatusType.COMMAND_TAG, secrets.randbits(31))
-        encode_eol(cmdbuffer)
-        
-        logger.info(f"Setting ISB for SSRC {ssrc} to {enable}")
-        self.send_command(cmdbuffer)
-
-    def set_envelope_detection(self, ssrc: int, enable: bool):
-        """
-        Enable/disable envelope detection for AM
-        
-        Args:
-            ssrc: SSRC of the channel
-            enable: Enable envelope detection
-        """
-        cmdbuffer = bytearray()
-        cmdbuffer.append(CMD)
-        
-        encode_int(cmdbuffer, StatusType.ENVELOPE, 1 if enable else 0)
-        encode_int(cmdbuffer, StatusType.OUTPUT_SSRC, ssrc)
-        encode_int(cmdbuffer, StatusType.COMMAND_TAG, secrets.randbits(31))
-        encode_eol(cmdbuffer)
-        
-        logger.info(f"Setting envelope detection for SSRC {ssrc} to {enable}")
-        self.send_command(cmdbuffer)
-
-    def set_opus_bitrate(self, ssrc: int, bitrate: int):
-        """
-        Set Opus codec bitrate
-        
-        Args:
-            ssrc: SSRC of the channel
-            bitrate: Bitrate in bits per second (6000-510000)
-        """
-        cmdbuffer = bytearray()
-        cmdbuffer.append(CMD)
-        
-        encode_int(cmdbuffer, StatusType.OPUS_BITRATE, bitrate)
-        encode_int(cmdbuffer, StatusType.OUTPUT_SSRC, ssrc)
-        encode_int(cmdbuffer, StatusType.COMMAND_TAG, secrets.randbits(31))
-        encode_eol(cmdbuffer)
-        
-        logger.info(f"Setting Opus bitrate for SSRC {ssrc} to {bitrate}")
-        self.send_command(cmdbuffer)
-    
     def _setup_status_listener(self):
         """Set up socket to listen for status responses"""
         # Create a separate socket for receiving status messages

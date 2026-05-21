@@ -38,6 +38,7 @@ def _bare_control() -> RadiodControl:
     c._command_window_start = time.time()
     c._rate_limit_lock = threading.Lock()
     c.metrics = MagicMock()
+    c.client_id = None
     return c
 
 

@@ -41,6 +41,7 @@ from .discovery import ChannelInfo
 from .rtp_recorder import RTPHeader, parse_rtp_header, rtp_to_wallclock
 from .resequencer import PacketResequencer, RTPPacket
 from .stream_quality import GapSource, GapEvent, StreamQuality
+from .types import Encoding
 
 logger = logging.getLogger(__name__)
 
@@ -48,16 +49,54 @@ logger = logging.getLogger(__name__)
 SampleCallback = Callable[[np.ndarray, StreamQuality], None]
 
 
+# G.711 µ-law and A-law decode tables (ITU-T G.711). Each maps a uint8 byte
+# to its signed 16-bit linear PCM equivalent. Precomputed once at import.
+def _build_mulaw_table() -> np.ndarray:
+    out = np.empty(256, dtype=np.int16)
+    for i in range(256):
+        u = ~i & 0xFF
+        sign = u & 0x80
+        exponent = (u >> 4) & 0x07
+        mantissa = u & 0x0F
+        sample = ((mantissa << 3) + 0x84) << exponent
+        sample -= 0x84
+        out[i] = -sample if sign else sample
+    return out
+
+
+def _build_alaw_table() -> np.ndarray:
+    out = np.empty(256, dtype=np.int16)
+    for i in range(256):
+        a = i ^ 0x55
+        sign = a & 0x80
+        exponent = (a >> 4) & 0x07
+        mantissa = a & 0x0F
+        if exponent == 0:
+            sample = (mantissa << 4) + 8
+        else:
+            sample = ((mantissa << 4) + 0x108) << (exponent - 1)
+        out[i] = -sample if sign else sample
+    return out
+
+
+_MULAW_TABLE = _build_mulaw_table()
+_ALAW_TABLE = _build_alaw_table()
+
+
 def parse_rtp_samples(
     payload: bytes, encoding: int, is_iq: bool
 ) -> Optional[np.ndarray]:
     """Parse RTP payload samples based on encoding.
 
-    Shared by RadiodStream and MultiStream.
+    Shared by RadiodStream and MultiStream. Covers every linear-PCM encoding
+    radiod can grant: NO_ENCODING/S16LE/S16BE/F32LE/F32BE/F16LE/F16BE plus
+    G.711 MULAW/ALAW.  OPUS (3/7) requires libopus and is handled by
+    ``OpusDecoder`` in this module — not by this raw-sample helper.  AX25 (5)
+    is a framed protocol, not audio samples, and is also out of scope here.
 
     Args:
         payload: Raw RTP payload bytes (after header).
-        encoding: Channel encoding (0=none/F32LE, 1=S16LE, 2=S16BE, 4=F32LE, 8=F32BE).
+        encoding: Channel encoding from ``ka9q.types.Encoding``.
         is_iq: True for IQ (complex) mode, False for audio (real) mode.
 
     Returns:
@@ -65,48 +104,122 @@ def parse_rtp_samples(
         or None on error.
     """
     try:
+        floats = _decode_to_float32(payload, encoding, is_iq=is_iq)
+        if floats is None:
+            return None
         if is_iq:
-            # Honor `encoding` instead of always assuming F32LE. radiod
-            # silently downgrades F32 → S16 for some IQ-channel
-            # configurations (high sample rate + wide filter); when that
-            # happens the bytes mis-decode as float32 to ~10^34 garbage
-            # and occasional NaN (bit pattern of S16 sample pairs that
-            # happens to land in the IEEE-754 NaN-encoding region).
-            # Confirmed on bee1 2026-05-15 for T6/TSL3 BPSK PPS channel:
-            # requested encoding=4 (F32LE), granted encoding=2 (S16BE),
-            # decoded as F32LE → NaN-poisoned input, TSL3 dark.
-            if encoding == 1:  # S16LE
-                int16s = np.frombuffer(payload, dtype='<i2')
-                floats = int16s.astype(np.float32) / 32768.0
-            elif encoding == 2:  # S16BE
-                int16s = np.frombuffer(payload, dtype='>i2')
-                floats = int16s.astype(np.float32) / 32768.0
-            elif encoding == 8:  # F32BE
-                floats = np.frombuffer(payload, dtype='>f4').astype(np.float32)
-            elif encoding == 0 or encoding == 4:  # F32LE (or 0=default treated as F32LE)
-                floats = np.frombuffer(payload, dtype='<f4').astype(np.float32)
-            else:
-                logger.warning(f"Unsupported IQ encoding {encoding}, falling back to F32LE")
-                floats = np.frombuffer(payload, dtype='<f4').astype(np.float32)
+            # radiod silently downgrades F32 → S16 for some IQ-channel
+            # configurations (high sample rate + wide filter); confirmed on
+            # bee1 2026-05-15 for T6/TSL3 BPSK PPS channel (encoding=4
+            # requested, encoding=2 granted, decoded as F32LE → NaN-poisoned
+            # input, TSL3 dark). Honor the granted encoding above.
             if len(floats) % 2 != 0:
                 logger.warning(f"Odd number of samples in IQ payload: {len(floats)}")
                 return None
             samples = floats[0::2] + 1j * floats[1::2]
             return samples.astype(np.complex64)
-        else:
-            if encoding == 2:
-                int16_samples = np.frombuffer(payload, dtype='>i2')
-                return (int16_samples / 32768.0).astype(np.float32)
-            elif encoding == 1:
-                int16_samples = np.frombuffer(payload, dtype='<i2')
-                return (int16_samples / 32768.0).astype(np.float32)
-            elif encoding == 8:
-                return np.frombuffer(payload, dtype='>f4').astype(np.float32)
-            else:
-                return np.frombuffer(payload, dtype=np.float32)
+        return floats
     except Exception as e:
         logger.error(f"Failed to parse payload: {e}")
         return None
+
+
+def _decode_to_float32(payload: bytes, encoding: int, *, is_iq: bool = False) -> Optional[np.ndarray]:
+    """Decode raw RTP payload bytes to a flat float32 sample array.
+
+    For IQ the caller interleaves; for audio the array is the output directly.
+    Returns None for encodings this helper does not cover (OPUS, AX25).
+    The ``is_iq`` flag only affects the wording of the fallback warning so
+    callers can grep for IQ-specific decode anomalies (the bee1 TSL3 case).
+    """
+    if encoding in (Encoding.NO_ENCODING, Encoding.F32LE):
+        return np.frombuffer(payload, dtype='<f4').astype(np.float32, copy=False)
+    if encoding == Encoding.F32BE:
+        return np.frombuffer(payload, dtype='>f4').astype(np.float32, copy=False)
+    if encoding == Encoding.S16LE:
+        return np.frombuffer(payload, dtype='<i2').astype(np.float32) / 32768.0
+    if encoding == Encoding.S16BE:
+        return np.frombuffer(payload, dtype='>i2').astype(np.float32) / 32768.0
+    if encoding == Encoding.F16LE:
+        return np.frombuffer(payload, dtype='<f2').astype(np.float32)
+    if encoding == Encoding.F16BE:
+        return np.frombuffer(payload, dtype='>f2').astype(np.float32)
+    if encoding == Encoding.MULAW:
+        idx = np.frombuffer(payload, dtype=np.uint8)
+        return (_MULAW_TABLE[idx].astype(np.float32) / 32768.0)
+    if encoding == Encoding.ALAW:
+        idx = np.frombuffer(payload, dtype=np.uint8)
+        return (_ALAW_TABLE[idx].astype(np.float32) / 32768.0)
+    if encoding in (Encoding.OPUS, Encoding.OPUS_VOIP):
+        # Opus payloads are codec frames, not raw samples — caller must use
+        # ka9q.stream.OpusDecoder (requires libopus / opuslib).
+        return None
+    if encoding == Encoding.AX25:
+        # AX25 is a framed protocol — bytes are the payload, not samples.
+        return None
+    kind = "IQ" if is_iq else "audio"
+    logger.warning(f"Unsupported {kind} encoding {encoding}, falling back to F32LE")
+    return np.frombuffer(payload, dtype='<f4').astype(np.float32, copy=False)
+
+
+class OpusDecoder:
+    """Optional Opus → float32 decoder for radiod OPUS / OPUS_VOIP streams.
+
+    Requires the ``opuslib`` package (``pip install ka9q-python[opus]`` or
+    ``pip install opuslib``).  Maintains internal codec state across calls so
+    packet-loss concealment works end-to-end; create one instance per stream
+    SSRC and feed it each RTP payload in order.
+
+    Example::
+
+        dec = OpusDecoder(sample_rate=48000, channels=1)
+        for payload in opus_payloads:
+            samples = dec.decode(payload)  # float32, mono
+    """
+
+    def __init__(self, sample_rate: int = 48000, channels: int = 1):
+        try:
+            import opuslib  # type: ignore
+        except ImportError as exc:
+            raise RuntimeError(
+                "Opus decoding requires opuslib — install with "
+                "'pip install ka9q-python[opus]' or 'pip install opuslib'"
+            ) from exc
+        if sample_rate not in (8000, 12000, 16000, 24000, 48000):
+            raise ValueError(
+                f"Opus sample_rate must be one of 8000/12000/16000/24000/48000; got {sample_rate}"
+            )
+        if channels not in (1, 2):
+            raise ValueError(f"Opus channels must be 1 or 2; got {channels}")
+        self._sample_rate = sample_rate
+        self._channels = channels
+        self._dec = opuslib.Decoder(sample_rate, channels)
+        # 120 ms is the largest Opus frame; allocate per-call.
+        self._max_frame_samples = (sample_rate * 120) // 1000
+
+    @property
+    def sample_rate(self) -> int:
+        return self._sample_rate
+
+    @property
+    def channels(self) -> int:
+        return self._channels
+
+    def decode(self, payload: bytes, *, fec: bool = False) -> np.ndarray:
+        """Decode one Opus RTP payload to float32 PCM samples.
+
+        For stereo streams the result is interleaved L,R,L,R,…  Empty payload
+        triggers packet-loss concealment (one frame of silence/extrapolation).
+        """
+        if not payload and not fec:
+            # Generate one PLC frame of typical Opus duration (20 ms).
+            n_samples = (self._sample_rate * 20) // 1000
+        else:
+            n_samples = self._max_frame_samples
+        pcm = self._dec.decode(payload, n_samples, decode_fec=fec)
+        # opuslib returns bytes of int16 little-endian; convert to float32 [-1,1].
+        int16s = np.frombuffer(pcm, dtype='<i2')
+        return int16s.astype(np.float32) / 32768.0
 
 
 class RadiodStream:

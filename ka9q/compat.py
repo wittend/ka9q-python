@@ -12,4 +12,4 @@ Usage:
     print(f"Compatible with ka9q-radio at {KA9Q_RADIO_COMMIT}")
 """
 
-KA9Q_RADIO_COMMIT: str = "f78cff9cc8c7fa33ea49aac9176d9263c535a332"
+KA9Q_RADIO_COMMIT: str = "d555f1853422ecc551ac7e4064b9d9cfdb743764"
