@@ -56,7 +56,15 @@ Lower-level usage (explicit control):
         )
         print(f"Created channel with SSRC: {ssrc}")
 """
-__version__ = '3.14.2'
+try:
+    from importlib.metadata import version as _pkg_version, PackageNotFoundError as _PkgNotFound
+    try:
+        __version__ = _pkg_version("ka9q-python")
+    except _PkgNotFound:
+        __version__ = "0.0.0+unknown"
+    del _pkg_version, _PkgNotFound
+except ImportError:
+    __version__ = "0.0.0+unknown"
 __author__ = 'Michael Hauan AC0G'
 
 from .control import RadiodControl, allocate_ssrc

@@ -1,5 +1,20 @@
 # Changelog
 
+## [3.15.1] - 2026-05-21
+
+### Fixed
+
+- **`ka9q.__version__` was stale.**  v3.15.0's wheel correctly identified
+  itself as `3.15.0` in dist-info, but the `__version__` string baked
+  into `ka9q/__init__.py` still read `'3.14.2'` — the in-package
+  introspection answer was wrong for every consumer.  The fix replaces
+  the hardcoded literal with `importlib.metadata.version("ka9q-python")`,
+  so `__version__` now always tracks the installed dist-info — drift
+  between release version and code-reported version is no longer
+  possible.  Falls back to `"0.0.0+unknown"` on import error or when
+  the package is not installed (e.g. running from a source tree
+  without an editable install).
+
 ## [3.15.0] - 2026-05-21
 
 ### Added
