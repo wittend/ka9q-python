@@ -399,13 +399,17 @@ class StatusListener:
             # register_channel() (or ensure_channel + register).
             return
 
-        # In-place mutation: single attribute assignment is atomic under
-        # the GIL.  The pair (gps_time, rtp_timesnap) is NOT atomic
-        # together, but a torn read produces an error of order
-        # ``(rate_drift * delta_t)`` which is sub-µs — negligible vs the
-        # 1 ns chrony filter floor.  The race window is microseconds.
-        ci.gps_time = gps_time
-        ci.rtp_timesnap = rtp_timesnap
+        # Atomic anchor swap (v3.16.0+ via ChannelInfo.update_anchor):
+        # writes a single tuple ``_anchor_pair = (gps_time, rtp_timesnap)``
+        # in one GIL-atomic attribute assignment.  Readers using
+        # :py:meth:`ChannelInfo.get_anchor` see either the old pair or
+        # the new pair — never a torn combination off by ~one listener-
+        # cadence (~450 ms).  Legacy ``ci.gps_time`` / ``ci.rtp_timesnap``
+        # are also updated for backward compatibility with diagnostic
+        # readers, but ``rtp_to_wallclock`` and other transactional
+        # consumers go through ``get_anchor`` to dodge the torn-read
+        # window entirely.
+        ci.update_anchor(gps_time, rtp_timesnap)
 
         # Opportunistic refresh of encoding (radiod can grant a different
         # encoding than requested).  Other fields (frequency, sample_rate)

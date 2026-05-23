@@ -171,18 +171,30 @@ def rtp_to_wallclock(
         SHM samples stuck at the snapshot's wall-clock time, ~12.4 h
         behind.  Chrony filtered every sample and reach fell to 0.
     """
-    if channel.gps_time is None or channel.rtp_timesnap is None:
+    # Read the (gps_time, rtp_timesnap) anchor as a single atomic
+    # snapshot.  This matters when a background StatusListener (v3.16.0+)
+    # is mutating the anchor concurrently: separate reads of
+    # ``channel.gps_time`` and ``channel.rtp_timesnap`` could land
+    # either side of an update and yield a torn pair off by up to one
+    # listener-cadence interval (typically ~450 ms on bee1).  The
+    # tuple lives in ``_anchor_pair``, a single GIL-atomic attribute.
+    # See ChannelInfo.get_anchor() docstring for the full story.
+    anchor = channel.get_anchor()
+    if anchor is None:
+        return None
+    gps_time, rtp_timesnap = anchor
+    if gps_time is None or rtp_timesnap is None:
         return None
 
     # Convert GPS nanoseconds to Unix time
     # GPS epoch is Jan 6, 1980; Unix epoch is Jan 1, 1970
     # gps_time is nanoseconds since GPS epoch, so add GPS_UTC_OFFSET (in ns)
     # AND subtract current GPS_LEAP_SECONDS (18s) to align with UTC
-    sender_time = channel.gps_time + BILLION * (GPS_UTC_OFFSET - GPS_LEAP_SECONDS)
+    sender_time = gps_time + BILLION * (GPS_UTC_OFFSET - GPS_LEAP_SECONDS)
 
     # Signed 32-bit RTP delta — correct within ±2**31 samples of
     # the snapshot.
-    rtp_delta = int((rtp_timestamp - channel.rtp_timesnap) & 0xFFFFFFFF)
+    rtp_delta = int((rtp_timestamp - rtp_timesnap) & 0xFFFFFFFF)
     if rtp_delta > 0x7FFFFFFF:
         rtp_delta -= 0x100000000
 

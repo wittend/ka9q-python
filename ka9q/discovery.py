@@ -22,7 +22,32 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class ChannelInfo:
-    """Information about a ka9q-radio channel"""
+    """Information about a ka9q-radio channel.
+
+    Timing anchor atomicity
+    -----------------------
+    ``gps_time`` and ``rtp_timesnap`` form a paired anchor — they were
+    captured at the same instant by radiod and only make sense together.
+    Reading them as separate attributes is **not atomic**: under
+    concurrent modification (e.g. the
+    :py:class:`ka9q.status_listener.StatusListener` background thread
+    updating both fields on every STATUS broadcast), a consumer that
+    reads ``gps_time`` then ``rtp_timesnap`` can land between the two
+    writes and get a torn pair.
+
+    For ``rtp_to_wallclock`` and other consumers that compare absolute
+    time against an external reference (where torn-pair errors of up to
+    the listener cadence — typically ~450 ms — exceed downstream gates),
+    use :py:meth:`get_anchor` to obtain a consistent snapshot, or have
+    the listener call :py:meth:`update_anchor` instead of mutating the
+    individual fields.  Both rely on Python's GIL making single attribute
+    access atomic — the snapshot is stored in ``_anchor_pair`` as a
+    single tuple, written and read in one bytecode each.
+
+    Direct reads of ``ci.gps_time`` and ``ci.rtp_timesnap`` remain valid
+    for non-paired uses (diagnostic logging, schema introspection); the
+    tear risk only matters when both are consumed transactionally.
+    """
     ssrc: int
     preset: str
     sample_rate: int
@@ -34,6 +59,66 @@ class ChannelInfo:
     rtp_timesnap: Optional[int] = None  # RTP timestamp at GPS_TIME
     encoding: int = 0  # stream encoding (0=none, 4=F32, etc)
     chain_delay_correction_ns: Optional[int] = None  # L6 BPSK PPS chain-delay calibration (nanoseconds)
+
+    def __post_init__(self):
+        # Seed the atomic-pair snapshot from the constructor args if both
+        # were provided.  Lets ``get_anchor`` return the construction-time
+        # pair before any ``update_anchor`` call has happened.
+        if self.gps_time is not None and self.rtp_timesnap is not None:
+            self._anchor_pair = (self.gps_time, self.rtp_timesnap)
+        else:
+            self._anchor_pair = None
+
+    def get_anchor(self) -> Optional[Tuple[Optional[int], Optional[int]]]:
+        """Return the ``(gps_time, rtp_timesnap)`` anchor as a single
+        atomic snapshot.
+
+        Reads a single attribute (``_anchor_pair``) — GIL-atomic, so the
+        returned tuple is always internally consistent, never torn.
+        Returns ``None`` if the anchor has not been set.
+
+        Use this from :py:func:`rtp_to_wallclock` and any other code
+        path that consumes both fields transactionally.  Direct reads
+        of ``self.gps_time`` / ``self.rtp_timesnap`` are still permitted
+        for non-paired uses but should not be combined when consistency
+        matters.
+        """
+        # Single attribute read — atomic under the GIL.
+        pair = getattr(self, '_anchor_pair', None)
+        if pair is not None:
+            return pair
+        # Backward compat fallback: synthesize from the legacy fields.
+        # Only happens when ``_anchor_pair`` was never initialised (e.g.
+        # for ChannelInfo objects constructed via __new__ in test setups).
+        gps = self.gps_time
+        rtp = self.rtp_timesnap
+        if gps is None or rtp is None:
+            return None
+        return (gps, rtp)
+
+    def update_anchor(self, gps_time: int, rtp_timesnap: int) -> None:
+        """Atomically update the ``(gps_time, rtp_timesnap)`` anchor pair.
+
+        Writes a single tuple attribute (``_anchor_pair``) — GIL-atomic.
+        Readers using :py:meth:`get_anchor` see either the old pair or
+        the new pair, never a torn combination.
+
+        Also updates the legacy ``gps_time`` and ``rtp_timesnap`` fields
+        for backward compatibility with code that reads them directly.
+        Those updates can still tear if read as a pair without
+        ``get_anchor`` — that's why the pair lives in
+        ``_anchor_pair``.  Tuple is written first so the atomic snapshot
+        is the leading edge of any state change.
+        """
+        # Atomic pair first — this is the source of truth for
+        # transactional readers.
+        self._anchor_pair = (gps_time, rtp_timesnap)
+        # Legacy field mirrors for backward compat.  Order doesn't
+        # matter for the atomic story (consumers that need both should
+        # use get_anchor); we update them so diagnostic code that reads
+        # ``.gps_time`` directly sees the current value.
+        self.gps_time = gps_time
+        self.rtp_timesnap = rtp_timesnap
 
 
 def _create_status_listener_socket(multicast_addr: str, interface: Optional[str] = None) -> socket.socket:

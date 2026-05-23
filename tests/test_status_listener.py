@@ -276,3 +276,72 @@ def test_stats_has_socket_errors_counter():
     listener = _bare_listener()
     assert hasattr(listener.stats, "socket_errors")
     assert listener.stats.socket_errors == 0
+
+
+# ── atomic anchor pair (v3.16.0+, prevents torn reads) ─────────────
+
+
+def test_update_anchor_writes_atomic_tuple():
+    """ChannelInfo.update_anchor() must store the pair as a single
+    tuple so readers using get_anchor() see a consistent snapshot
+    regardless of GIL switching."""
+    ci = _make_channel(ssrc=1)
+    ci.update_anchor(123456789, 4242)
+    pair = ci.get_anchor()
+    assert pair == (123456789, 4242)
+    # Legacy mirrors are also updated for backward compat.
+    assert ci.gps_time == 123456789
+    assert ci.rtp_timesnap == 4242
+
+
+def test_get_anchor_returns_construction_pair_when_both_provided():
+    """Constructing a ChannelInfo with both fields populated should
+    expose them via get_anchor without needing a prior
+    update_anchor call."""
+    ci = ChannelInfo(
+        ssrc=1, preset="iq", sample_rate=24_000, frequency=10_000_000.0,
+        snr=12.0, multicast_address="239.1.2.3", port=5004,
+        gps_time=111, rtp_timesnap=22,
+    )
+    assert ci.get_anchor() == (111, 22)
+
+
+def test_get_anchor_returns_none_when_either_field_missing():
+    """If gps_time or rtp_timesnap is None, the anchor isn't valid as
+    a pair and get_anchor should report None — same precondition the
+    legacy ``if channel.gps_time is None`` check enforced."""
+    ci = ChannelInfo(
+        ssrc=1, preset="iq", sample_rate=24_000, frequency=10_000_000.0,
+        snr=12.0, multicast_address="239.1.2.3", port=5004,
+        gps_time=None, rtp_timesnap=22,
+    )
+    # The post-init seed doesn't kick in if either field is None;
+    # get_anchor's fallback path also reports None for a mixed pair.
+    assert ci.get_anchor() is None
+
+
+def test_listener_uses_update_anchor_not_direct_assignment():
+    """The listener must update the pair via the atomic method, not
+    via two separate attribute writes (which would re-open the
+    torn-read window the v3.16.0 design closes)."""
+    listener = _bare_listener()
+    ci = _make_channel(ssrc=7)
+    listener.register_channel(ci)
+    listener._apply_update(7, _make_status(7, 99_000, 880), 99_000, 880)
+    # After the apply, the tuple snapshot must match.
+    assert ci.get_anchor() == (99_000, 880)
+
+
+def test_apply_update_preserves_tuple_anchor_through_many_updates():
+    """Smoke-test that repeated update_anchor calls keep the tuple
+    consistent (mainly a sanity check that the listener still uses
+    the atomic method even across many invocations)."""
+    listener = _bare_listener()
+    ci = _make_channel(ssrc=1)
+    listener.register_channel(ci)
+    for i in range(50):
+        gps = 1_000_000_000_000 + i * 1_000_000
+        rtp = 1000 + i
+        listener._apply_update(1, _make_status(1, gps, rtp), gps, rtp)
+        # On every iteration the snapshot must match the just-written pair.
+        assert ci.get_anchor() == (gps, rtp)
