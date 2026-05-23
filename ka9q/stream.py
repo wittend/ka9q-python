@@ -356,7 +356,7 @@ class RadiodStream:
     def _create_socket(self) -> socket.socket:
         """Create and configure multicast receive socket."""
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        
+
         # Allow address reuse
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         if hasattr(socket, 'SO_REUSEPORT'):
@@ -364,7 +364,20 @@ class RadiodStream:
                 sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
             except OSError:
                 pass  # Not supported on all platforms
-        
+
+        # Large receive buffer — matches MultiStream (commit 3a6cf26).
+        # Single-channel sockets see less aggregate throughput than
+        # MultiStream's multi-channel one, but they're also more
+        # vulnerable to GIL-stall packet loss because no other consumer
+        # is draining when this one stalls.  64 MB gives the kernel
+        # enough headroom across the typical sub-second GIL pause.
+        # Honored only if ``net.core.rmem_max >= 64 MB``; sigmond's
+        # rule_kernel_rcvbuf_adequate provisions this.
+        try:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 64 * 1024 * 1024)
+        except OSError:
+            pass
+
         # Bind to port
         sock.bind(('0.0.0.0', self.channel.port))
 
