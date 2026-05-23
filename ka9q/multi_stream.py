@@ -326,9 +326,14 @@ class MultiStream:
             except OSError:
                 pass
 
-        # Large receive buffer for multi-channel throughput
+        # Large receive buffer for multi-channel throughput.
+        # Bumped from 8 MB → 64 MB on 2026-05-23 after observing 412M
+        # UDP RcvbufErrors on B4-100 with sustained GIL stalls.  Kernel
+        # doubles for bookkeeping → 128 MB visible in ``ss -m``.  Honored
+        # only if ``net.core.rmem_max >= 64 MB``; sigmond provisions
+        # 128 MB in /etc/sysctl.d/99-wspr-recorder.conf.
         try:
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 8 * 1024 * 1024)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 64 * 1024 * 1024)
         except OSError:
             pass
 
