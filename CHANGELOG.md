@@ -1,5 +1,58 @@
 # Changelog
 
+## [3.16.0] - 2026-05-23
+
+### Added
+
+- **`StatusListener` — continuous STATUS multicast listener.**  New
+  `ka9q.status_listener.StatusListener` class subscribes to radiod's
+  STATUS multicast (port 5006) in a background thread and refreshes
+  `ChannelInfo.gps_time` / `.rtp_timesnap` on every broadcast.  Replaces
+  the previous one-shot `discover_channels` anchor capture, which
+  froze the timing anchor at SSRC discovery — leaving `rtp_to_wallclock`
+  to project forward from a host-clock value that drifts at the
+  chrony slew rate (~3.8 µs/s on a typical disciplined host).
+
+  Mutates the registered `ChannelInfo` in place so callers holding a
+  reference (e.g. hf-timestd's cached `_t6_channel_info`) see fresh
+  values immediately.  Supports per-SSRC and wildcard callbacks for
+  explicit notification.  Uses `SO_REUSEPORT` so it can coexist with
+  `RadiodControl`'s own status socket without stealing tune/discover
+  responses — multicast packets are delivered to every joined socket.
+
+  Opt-in via `RadiodControl.start_status_listener()`; closing the
+  control object stops the listener.  See class docstring for usage.
+
+- **`RadiodControl.start_status_listener(...)` / `.stop_status_listener(...)`
+  / `.status_listener` property** — convenience wiring to attach a
+  `StatusListener` to an existing control session.  Listener is
+  stopped automatically by `RadiodControl.close()`.
+
+### Why this exists
+
+Before this release, every ka9q-python consumer (hf-timestd, codar,
+psk, hfdl, wspr, wsprdaemon-client, gpsdo-monitor) labeled data via
+`rtp_to_wallclock(rtp, channel)` with a ChannelInfo whose
+`gps_time`/`rtp_timesnap` were captured once at SSRC discovery.
+For long-running services this meant labels drifted from GPSDO truth
+at the host-clock slew rate — on bee1 (`chrony` slewing at
+~3.8 µs/s), labels accumulated ~330 ms of drift per day.
+
+The chrony SHM-push side of hf-timestd's BPSK PPS path (HPPS / HFPS)
+manifested this most visibly: TS-1 source reported tracking with
+1 ns standard deviation but drifted at the host slew rate, blocking
+DASI2 grant deployment.  Faster anchor refresh closes the drift.
+
+### Backwards compatibility
+
+- All existing tests pass unchanged.  The listener is **opt-in** —
+  consumers that don't call `start_status_listener()` see no behavior
+  change.
+- `ChannelInfo` is unchanged structurally; only its mutability
+  contract is clarified (the timing fields were always documented as
+  "the latest snapshot", which is now true continuously rather than
+  once).
+
 ## [3.15.1] - 2026-05-21
 
 ### Fixed

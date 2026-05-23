@@ -115,6 +115,7 @@ from .managed_stream import (
 )
 from .multi_stream import MultiStream
 from .spectrum_stream import SpectrumStream
+from .status_listener import StatusListener, StatusListenerStats
 
 __all__ = [
     # Control
@@ -177,6 +178,10 @@ __all__ = [
 
     # Spectrum Stream (FFT bin data receiver)
     'SpectrumStream',
+
+    # Continuous STATUS listener (live timing anchor refresh)
+    'StatusListener',
+    'StatusListenerStats',
 
     # Utilities
     'generate_multicast_ip',

@@ -682,6 +682,136 @@ def decode_socket(data: bytes, length: int) -> dict:
         return {'family': 'unknown', 'address': '', 'port': 0}
 
 
+def decode_status_dict(buffer: bytes) -> dict:
+    """Decode a radiod STATUS packet into a flat dictionary.
+
+    Standalone module-level decoder — does NOT require a RadiodControl
+    instance, so it's safe to call from contexts that should not open
+    a control socket (notably :class:`ka9q.status_listener.StatusListener`,
+    which would otherwise drag in a full control session just to parse
+    bytes).
+
+    Returns an empty dict for non-STATUS packets (first byte != 0).
+    Unknown TLV tags are silently skipped.
+
+    Used by :meth:`RadiodControl._decode_status_response` (which adds a
+    metric bump on top of the same parse) and by the status listener.
+    """
+    status: dict = {}
+
+    if len(buffer) == 0 or buffer[0] != 0:
+        return status  # Not a status response
+
+    cp = 1  # Skip packet type byte
+
+    while cp < len(buffer):
+        if cp >= len(buffer):
+            break
+
+        type_val = buffer[cp]
+        cp += 1
+
+        if type_val == StatusType.EOL:
+            break
+
+        if cp >= len(buffer):
+            break
+
+        optlen = buffer[cp]
+        cp += 1
+
+        # Handle extended length encoding
+        if optlen & 0x80:
+            length_of_length = optlen & 0x7f
+            optlen = 0
+            for _ in range(length_of_length):
+                if cp >= len(buffer):
+                    break
+                optlen = (optlen << 8) | buffer[cp]
+                cp += 1
+
+        if cp + optlen > len(buffer):
+            break
+
+        data = buffer[cp:cp + optlen]
+
+        # Decode based on type
+        if type_val == StatusType.COMMAND_TAG:
+            status['command_tag'] = decode_int32(data, optlen)
+        elif type_val == StatusType.GPS_TIME:
+            status['gps_time'] = decode_int64(data, optlen)
+        elif type_val == StatusType.RTP_TIMESNAP:
+            status['rtp_timesnap'] = decode_int32(data, optlen)
+        elif type_val == StatusType.RADIO_FREQUENCY:
+            status['frequency'] = decode_double(data, optlen)
+        elif type_val == StatusType.OUTPUT_SSRC:
+            status['ssrc'] = decode_int32(data, optlen)
+        elif type_val == StatusType.AGC_ENABLE:
+            status['agc_enable'] = decode_bool(data, optlen)
+        elif type_val == StatusType.GAIN:
+            status['gain'] = decode_float(data, optlen)
+        elif type_val == StatusType.RF_GAIN:
+            status['rf_gain'] = decode_float(data, optlen)
+        elif type_val == StatusType.RF_ATTEN:
+            status['rf_atten'] = decode_float(data, optlen)
+        elif type_val == StatusType.RF_AGC:
+            status['rf_agc'] = decode_int(data, optlen)
+        elif type_val == StatusType.PRESET:
+            status['preset'] = decode_string(data, optlen)
+        elif type_val == StatusType.LOW_EDGE:
+            status['low_edge'] = decode_float(data, optlen)
+        elif type_val == StatusType.HIGH_EDGE:
+            status['high_edge'] = decode_float(data, optlen)
+        elif type_val == StatusType.NOISE_DENSITY:
+            status['noise_density'] = decode_float(data, optlen)
+        elif type_val == StatusType.BASEBAND_POWER:
+            status['baseband_power'] = decode_float(data, optlen)
+        elif type_val == StatusType.OUTPUT_SAMPRATE:
+            status['sample_rate'] = decode_int(data, optlen)
+        elif type_val == StatusType.OUTPUT_ENCODING:
+            status['encoding'] = decode_int(data, optlen)
+        elif type_val == StatusType.OUTPUT_DATA_DEST_SOCKET:
+            status['destination'] = decode_socket(data, optlen)
+        elif type_val == StatusType.OUTPUT_TTL:
+            status['ttl'] = decode_int(data, optlen)
+            if status['ttl'] == 0:
+                logger.warning(
+                    f"Radiod reporting TTL=0 for SSRC "
+                    f"{status.get('ssrc', 'unknown')}: Multicast data "
+                    f"restricted to localhost loopback only!"
+                )
+        elif type_val == StatusType.LIFETIME:
+            status['lifetime'] = decode_int(data, optlen)
+        elif type_val == StatusType.DESCRIPTION:
+            status['description'] = decode_string(data, optlen)
+
+        cp += optlen
+
+    # Calculate SNR if we have the necessary data
+    if all(k in status for k in
+           ['baseband_power', 'low_edge', 'high_edge', 'noise_density']):
+        import math
+        bandwidth = abs(status['high_edge'] - status['low_edge'])
+
+        if bandwidth > 0:
+            try:
+                noise_power_db = (
+                    status['noise_density'] + 10 * math.log10(bandwidth)
+                )
+                signal_plus_noise_db = status['baseband_power']
+                noise_power = 10 ** (noise_power_db / 10)
+                signal_plus_noise = 10 ** (signal_plus_noise_db / 10)
+
+                if noise_power > 0:
+                    snr_linear = signal_plus_noise / noise_power - 1
+                    if snr_linear > 0:
+                        status['snr'] = 10 * math.log10(snr_linear)
+            except (ValueError, ZeroDivisionError, OverflowError):
+                pass
+
+    return status
+
+
 class RadiodControl:
     """
     Control interface for radiod
@@ -724,6 +854,10 @@ class RadiodControl:
         self._status_sock = None  # Cached status listener socket for tune()
         self._status_sock_lock = None  # Will be initialized when needed
         self._socket_lock = threading.RLock()  # Protect control socket operations
+
+        # Optional continuous STATUS listener (live timing anchor refresh).
+        # Lazily created by start_status_listener(); see ka9q.status_listener.
+        self._status_listener = None
         
         # Rate limiting
         self.max_commands_per_sec = max_commands_per_sec
@@ -1978,127 +2112,25 @@ class RadiodControl:
     
     def _decode_status_response(self, buffer: bytes) -> dict:
         """
-        Decode a status response packet from radiod
-        
+        Decode a status response packet from radiod (thin wrapper).
+
+        Delegates the actual parse to the module-level
+        :func:`decode_status_dict` and bumps the per-instance metric.
+        Kept as a method for backward compatibility with callers that
+        already use ``self._decode_status_response`` (e.g.
+        ``listen_status``, ``tune``).
+
         Args:
             buffer: Raw response bytes
-            
+
         Returns:
             Dictionary containing decoded status fields
         """
-        status = {}
-        
-        if len(buffer) == 0 or buffer[0] != 0:
-            return status  # Not a status response
-        
-        cp = 1  # Skip packet type byte
-        
-        while cp < len(buffer):
-            if cp >= len(buffer):
-                break
-            
-            type_val = buffer[cp]
-            cp += 1
-            
-            if type_val == StatusType.EOL:
-                break
-            
-            if cp >= len(buffer):
-                break
-            
-            optlen = buffer[cp]
-            cp += 1
-            
-            # Handle extended length encoding
-            if optlen & 0x80:
-                length_of_length = optlen & 0x7f
-                optlen = 0
-                for _ in range(length_of_length):
-                    if cp >= len(buffer):
-                        break
-                    optlen = (optlen << 8) | buffer[cp]
-                    cp += 1
-            
-            if cp + optlen > len(buffer):
-                break
-            
-            data = buffer[cp:cp + optlen]
-            
-            # Decode based on type
-            if type_val == StatusType.COMMAND_TAG:
-                status['command_tag'] = decode_int32(data, optlen)
-            elif type_val == StatusType.GPS_TIME:
-                status['gps_time'] = decode_int64(data, optlen)
-            elif type_val == StatusType.RTP_TIMESNAP:
-                status['rtp_timesnap'] = decode_int32(data, optlen)
-            elif type_val == StatusType.RADIO_FREQUENCY:
-                status['frequency'] = decode_double(data, optlen)
-            elif type_val == StatusType.OUTPUT_SSRC:
-                status['ssrc'] = decode_int32(data, optlen)
-            elif type_val == StatusType.AGC_ENABLE:
-                status['agc_enable'] = decode_bool(data, optlen)
-            elif type_val == StatusType.GAIN:
-                status['gain'] = decode_float(data, optlen)
-            elif type_val == StatusType.RF_GAIN:
-                status['rf_gain'] = decode_float(data, optlen)
-            elif type_val == StatusType.RF_ATTEN:
-                status['rf_atten'] = decode_float(data, optlen)
-            elif type_val == StatusType.RF_AGC:
-                status['rf_agc'] = decode_int(data, optlen)
-            elif type_val == StatusType.PRESET:
-                status['preset'] = decode_string(data, optlen)
-            elif type_val == StatusType.LOW_EDGE:
-                status['low_edge'] = decode_float(data, optlen)
-            elif type_val == StatusType.HIGH_EDGE:
-                status['high_edge'] = decode_float(data, optlen)
-            elif type_val == StatusType.NOISE_DENSITY:
-                status['noise_density'] = decode_float(data, optlen)
-            elif type_val == StatusType.BASEBAND_POWER:
-                status['baseband_power'] = decode_float(data, optlen)
-            elif type_val == StatusType.OUTPUT_SAMPRATE:
-                status['sample_rate'] = decode_int(data, optlen)
-            elif type_val == StatusType.OUTPUT_ENCODING:
-                status['encoding'] = decode_int(data, optlen)
-            elif type_val == StatusType.OUTPUT_DATA_DEST_SOCKET:
-                status['destination'] = decode_socket(data, optlen)
-            elif type_val == StatusType.OUTPUT_TTL:
-                status['ttl'] = decode_int(data, optlen)
-                if status['ttl'] == 0:
-                    logger.warning(f"Radiod reporting TTL=0 for SSRC {status.get('ssrc', 'unknown')}: Multicast data restricted to localhost loopback only!")
-            elif type_val == StatusType.LIFETIME:
-                status['lifetime'] = decode_int(data, optlen)
-            elif type_val == StatusType.DESCRIPTION:
-                status['description'] = decode_string(data, optlen)
-
-            cp += optlen
-        
-        # Calculate SNR if we have the necessary data
-        if all(k in status for k in ['baseband_power', 'low_edge', 'high_edge', 'noise_density']):
-            import math
-            bandwidth = abs(status['high_edge'] - status['low_edge'])
-            
-            # Guard against invalid bandwidth
-            if bandwidth > 0:
-                try:
-                    noise_power_db = status['noise_density'] + 10 * math.log10(bandwidth)
-                    signal_plus_noise_db = status['baseband_power']
-                    # Convert to linear, calculate SNR, convert back to dB
-                    noise_power = 10 ** (noise_power_db / 10)
-                    signal_plus_noise = 10 ** (signal_plus_noise_db / 10)
-                    
-                    # Guard against division by zero
-                    if noise_power > 0:
-                        snr_linear = signal_plus_noise / noise_power - 1
-                        if snr_linear > 0:
-                            status['snr'] = 10 * math.log10(snr_linear)
-                except (ValueError, ZeroDivisionError, OverflowError):
-                    # SNR calculation failed, skip it
-                    pass
-        
-        # Track status received
-        self.metrics.status_received += 1
+        status = decode_status_dict(buffer)
+        if status:
+            self.metrics.status_received += 1
         return status
-    
+
     def get_metrics(self) -> dict:
         """
         Get current metrics as a dictionary
@@ -2982,14 +3014,67 @@ class RadiodControl:
             except Exception as exc:
                 logger.warning(f"listen_status callback raised: {exc}")
 
+    # ── Continuous STATUS listener (v3.16.0+) ──────────────────────
+
+    @property
+    def status_listener(self):
+        """The continuous STATUS listener, or ``None`` if not started.
+
+        Created lazily by :py:meth:`start_status_listener`.  See
+        :py:class:`ka9q.status_listener.StatusListener` for usage —
+        register channels and callbacks via that object directly.
+        """
+        return self._status_listener
+
+    def start_status_listener(self, socket_timeout: float = 0.5):
+        """Start a continuous STATUS multicast listener (idempotent).
+
+        Spawns a background thread that subscribes to radiod's STATUS
+        multicast and refreshes the ``gps_time``/``rtp_timesnap`` anchor
+        on every broadcast for all channels registered via
+        :py:meth:`StatusListener.register_channel`.
+
+        Returns the :py:class:`StatusListener` instance.
+
+        See :py:class:`ka9q.status_listener.StatusListener` for full
+        usage, including per-SSRC callbacks.
+
+        Closing the :py:class:`RadiodControl` (via :py:meth:`close` or
+        the context manager) stops the listener.
+        """
+        from .status_listener import StatusListener
+        if self._status_listener is None:
+            self._status_listener = StatusListener(
+                status_address=self.status_address,
+                interface=self.interface,
+                socket_timeout=socket_timeout,
+            )
+        if not self._status_listener.running:
+            self._status_listener.start()
+        return self._status_listener
+
+    def stop_status_listener(self, timeout: float = 2.0):
+        """Stop the continuous STATUS listener, if running."""
+        if self._status_listener is not None:
+            self._status_listener.stop(timeout=timeout)
+
     def close(self):
         """
         Close all sockets with proper error handling
-        
+
         This method is safe to call multiple times and handles errors gracefully.
         """
         errors = []
-        
+
+        # Stop continuous STATUS listener if running
+        if self._status_listener is not None:
+            try:
+                self._status_listener.stop()
+            except Exception as e:
+                errors.append(f"status listener: {e}")
+            finally:
+                self._status_listener = None
+
         # Close control socket
         if self.socket:
             try:
