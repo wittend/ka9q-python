@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """
-Live test of tune functionality against bee1-hf-status.local
+Live test of tune functionality against a radiod instance.
+
+Defaults to bee1-status.local; override with argv[1] or RADIOD_HOST.
 """
 
 import sys
@@ -20,8 +22,16 @@ def main():
     print("LIVE TUNE FUNCTIONALITY TEST")
     print("=" * 60)
     print()
-    
-    radiod_address = "bee1-hf-status.local"
+
+    # Accept hostname as argv[1] or RADIOD_HOST / RADIOD_ADDRESS env;
+    # otherwise default to bee1-status.local (matches conftest).
+    import os
+    radiod_address = (
+        sys.argv[1] if len(sys.argv) >= 2
+        else os.environ.get("RADIOD_HOST")
+        or os.environ.get("RADIOD_ADDRESS")
+        or "bee1-status.local"
+    )
     test_ssrc = 99999999  # Use a unique SSRC for testing
     
     print(f"Connecting to radiod at {radiod_address}...")

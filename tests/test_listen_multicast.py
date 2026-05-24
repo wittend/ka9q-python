@@ -60,11 +60,19 @@ def listen_multicast(mcast_group, port=5006, timeout=10):
 
 
 if __name__ == '__main__':
-    # Resolve bee1-hf-status.local
-    import subprocess
-    
-    hostname = "bee1-hf-status.local"
-    
+    # Standalone debug utility.  Resolves a radiod status-multicast
+    # mDNS name and dumps the first 10 STATUS packets received on it.
+    # Pass <hostname> as argv[1] or set RADIOD_HOST / RADIOD_ADDRESS;
+    # otherwise defaults to bee1-status.local (matches conftest).
+    import os
+
+    hostname = (
+        sys.argv[1] if len(sys.argv) >= 2
+        else os.environ.get("RADIOD_HOST")
+        or os.environ.get("RADIOD_ADDRESS")
+        or "bee1-status.local"
+    )
+
     try:
         addr_info = socket.getaddrinfo(hostname, None, socket.AF_INET, socket.SOCK_DGRAM)
         mcast_addr = addr_info[0][4][0]

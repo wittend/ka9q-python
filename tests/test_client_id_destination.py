@@ -83,9 +83,9 @@ class TestDestinationPrecedence(unittest.TestCase):
 
     @patch('ka9q.control.RadiodControl._connect')
     def test_client_id_derives_destination(self, _c):
-        ctrl = RadiodControl("bee1-hf-status.local", client_id="psk-recorder")
+        ctrl = RadiodControl("bee1-status.local", client_id="psk-recorder")
         expected = generate_multicast_ip(
-            "psk-recorder", radiod_host="bee1-hf-status.local",
+            "psk-recorder", radiod_host="bee1-status.local",
         )
         dest = _ensure_dest(ctrl, destination=None)
         self.assertEqual(dest, expected)
@@ -100,16 +100,16 @@ class TestDestinationUniqueness(unittest.TestCase):
 
     @patch('ka9q.control.RadiodControl._connect')
     def test_same_client_different_radiods(self, _c):
-        a = RadiodControl("bee1-hf-status.local", client_id="psk-recorder")
-        b = RadiodControl("bee3-hf-status.local", client_id="psk-recorder")
+        a = RadiodControl("bee1-status.local", client_id="psk-recorder")
+        b = RadiodControl("bee3-status.local", client_id="psk-recorder")
         self.assertNotEqual(_ensure_dest(a), _ensure_dest(b),
                             "psk-recorder on radiod-0 vs radiod-1 must use "
                             "distinct multicast groups")
 
     @patch('ka9q.control.RadiodControl._connect')
     def test_different_clients_same_radiod(self, _c):
-        a = RadiodControl("bee1-hf-status.local", client_id="psk-recorder")
-        b = RadiodControl("bee1-hf-status.local", client_id="wspr-recorder")
+        a = RadiodControl("bee1-status.local", client_id="psk-recorder")
+        b = RadiodControl("bee1-status.local", client_id="wspr-recorder")
         self.assertNotEqual(_ensure_dest(a), _ensure_dest(b),
                             "psk-recorder and wspr-recorder on one radiod "
                             "must use distinct multicast groups")
@@ -117,8 +117,8 @@ class TestDestinationUniqueness(unittest.TestCase):
     @patch('ka9q.control.RadiodControl._connect')
     def test_same_client_same_radiod_repeatable(self, _c):
         """Restart must bind to the same multicast group."""
-        a = RadiodControl("bee1-hf-status.local", client_id="psk-recorder")
-        b = RadiodControl("bee1-hf-status.local", client_id="psk-recorder")
+        a = RadiodControl("bee1-status.local", client_id="psk-recorder")
+        b = RadiodControl("bee1-status.local", client_id="psk-recorder")
         self.assertEqual(_ensure_dest(a), _ensure_dest(b))
 
 
@@ -134,13 +134,13 @@ class TestDestinationParticipatesInSsrc(unittest.TestCase):
         params = dict(frequency_hz=14_074_000.0, preset="iq",
                       sample_rate=16000, agc=False, gain=0.0)
         psk_dest = generate_multicast_ip("psk-recorder",
-                                          radiod_host="bee1-hf-status.local")
+                                          radiod_host="bee1-status.local")
         wspr_dest = generate_multicast_ip("wspr-recorder",
-                                           radiod_host="bee1-hf-status.local")
+                                           radiod_host="bee1-status.local")
         psk_ssrc = allocate_ssrc(**params, destination=psk_dest,
-                                  radiod_host="bee1-hf-status.local")
+                                  radiod_host="bee1-status.local")
         wspr_ssrc = allocate_ssrc(**params, destination=wspr_dest,
-                                   radiod_host="bee1-hf-status.local")
+                                   radiod_host="bee1-status.local")
         self.assertNotEqual(psk_ssrc, wspr_ssrc,
                             "Per-client destination must produce per-client "
                             "SSRC, so radiod's channel table separates them")

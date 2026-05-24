@@ -11,8 +11,9 @@ def pytest_addoption(parser):
     parser.addoption(
         "--radiod-host",
         action="store",
-        default=os.environ.get("RADIOD_HOST", "bee1-hf-status.local"),
-        help="Hostname of radiod instance to test against (for integration tests)"
+        default=os.environ.get("RADIOD_HOST", "bee1-status.local"),
+        help="Hostname of radiod instance to test against (for integration tests). "
+             "Override per-run with --radiod-host=<host> or RADIOD_HOST=<host>."
     )
 
 
@@ -25,5 +26,5 @@ def radiod_address(request):
     return (
         request.config.getoption("--radiod-host")
         or os.environ.get("RADIOD_ADDRESS")
-        or "bee1-hf-status.local"
+        or "bee1-status.local"
     )

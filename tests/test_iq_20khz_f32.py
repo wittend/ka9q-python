@@ -17,8 +17,6 @@ from typing import Dict, Any
 logging.basicConfig(level=logging.INFO, format='%(levelname)s:%(name)s:%(message)s')
 logger = logging.getLogger(__name__)
 
-sys.path.insert(0, '/home/mjh/git/ka9q-python')
-
 from ka9q import RadiodControl, discover_channels, allocate_ssrc
 from ka9q.resequencer import PacketResequencer, RTPPacket
 from ka9q.types import Encoding
@@ -263,9 +261,17 @@ def test_iq_20khz_f32(radiod_address: str):
 
 
 if __name__ == '__main__':
-    if len(sys.argv) < 2:
-        print("Usage: python test_iq_20khz_f32.py <radiod_address>")
-        sys.exit(1)
-    
-    success = test_iq_20khz_f32(sys.argv[1])
+    # Direct invocation: accept positional <radiod_address>, otherwise
+    # fall back to the same default the pytest fixture uses.  Mirrors
+    # conftest.radiod_address resolution so `python test_iq_20khz_f32.py`
+    # and `pytest tests/test_iq_20khz_f32.py` target the same host
+    # unless explicitly overridden.
+    import os
+    address = (
+        sys.argv[1] if len(sys.argv) >= 2
+        else os.environ.get("RADIOD_HOST")
+        or os.environ.get("RADIOD_ADDRESS")
+        or "bee1-status.local"
+    )
+    success = test_iq_20khz_f32(address)
     sys.exit(0 if success else 1)
