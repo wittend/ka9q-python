@@ -1,5 +1,59 @@
 # Changelog
 
+## [3.16.1] - 2026-05-24
+
+### Fixed
+
+- **`ChannelInfo` anchor pair is now atomic** (`channel-info`).  Adds
+  `ChannelInfo.get_anchor()` / `update_anchor()` — a tuple-based
+  atomic snapshot of `(gps_time, rtp_timesnap)`.  `rtp_to_wallclock`
+  now reads the pair via `get_anchor` (single GIL-atomic attribute
+  access) instead of two separate reads; `StatusListener` writes via
+  `update_anchor` (single tuple assignment).
+
+  Why: the `StatusListener` introduced in 3.16.0 refreshes the anchor
+  in place at sub-second cadence (~450 ms on a busy host).  Direct
+  sequential reads of `channel.gps_time` followed by
+  `channel.rtp_timesnap` could land between the listener's two writes
+  and yield a torn pair off by one listener-cadence interval.
+  `rtp_to_wallclock` then returned a wall-time off by that much —
+  usually harmless, but consumers comparing against an external time
+  reference with a tight gate (e.g. hf-timestd's T5 LB-1421 NMEA
+  disambig at ±0.5 s) could be pushed across the threshold and fall
+  back to a chrony walk that itself fails during a post-restart
+  cascade.
+
+  Backward compatible: constructor kwargs (`gps_time=`,
+  `rtp_timesnap=`) and direct field reads are unchanged; consumers
+  that need the pair transactionally must call `get_anchor`.  Adds
+  5 new tests (atomic update, construction-time seed, mixed-None
+  handling, listener path, 50-iteration consistency smoke test).
+
+### Performance
+
+- **`RadiodStream`: `SO_RCVBUF` raised 0 → 64 MB** (`stream.py`).
+  Mirrors the 3.16.0-cycle `multi_stream.py` change on the
+  single-channel path.  Previously `RadiodStream` sockets fell back
+  to the kernel default (`rmem_default`, typically 16 MB on hosts
+  with sigmond's `rule_kernel_rcvbuf_adequate` provisioning) and were
+  vulnerable to GIL-stall packet loss with no other consumer competing
+  to drain the buffer.  64 MB matches the `MultiStream` cap; sigmond
+  provisions `net.core.rmem_max=128 MB` (after kernel doubling), so
+  the request is honored.  Observed on bee1 2026-05-23 closing a
+  140 ms-stall-induced `gap=13440` resequencer event on hf-timestd's
+  T6 dedicated stream.
+
+- **`MultiStream`: `SO_RCVBUF` raised 8 MB → 64 MB** (`multi_stream.py`).
+  Observed 412 M UDP `RcvbufErrors` on B4-100 since boot, driven by
+  GIL contention preventing Python receiver threads from draining the
+  kernel-doubled 16 MB sockets.  Bigger absorber → more headroom
+  across GIL stalls before packets are dropped.  After applying:
+  socket `rb` shows 134217728 (128 MB visible after kernel doubling)
+  and recv-Q sits at ~50 KB in steady state (was hitting 14 MB / 16
+  MB before).  Requires `net.core.rmem_max >= 64 MB` to be honored —
+  provisioned by sigmond in
+  `/etc/sysctl.d/99-wspr-recorder.conf` alongside this change.
+
 ## [3.16.0] - 2026-05-23
 
 ### Added
