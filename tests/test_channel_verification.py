@@ -646,19 +646,33 @@ def verify_channel(
     
     Returns VerificationResult with all verification details.
     """
-    # Allocate SSRC
-    # Generate deterministic IP address for this client request
+    # Resolve the FINAL destination upfront so the SSRC the test
+    # computes matches the one ensure_channel will compute internally.
+    # Precedence matches ensure_channel: explicit test_case.destination
+    # wins; otherwise derive a deterministic multicast IP from
+    # (freq, preset, sample_rate) so each test case has its own group.
     from ka9q.addressing import generate_multicast_ip
-    unique_id = f"{test_case.frequency_hz}_{test_case.preset}_{test_case.sample_rate}"
-    client_ip = generate_multicast_ip(unique_id)
-    
+    if test_case.destination is not None:
+        client_ip = test_case.destination
+    else:
+        unique_id = f"{test_case.frequency_hz}_{test_case.preset}_{test_case.sample_rate}"
+        client_ip = generate_multicast_ip(unique_id)
+
+    # CRITICAL: pass radiod_host so this allocate_ssrc() call matches
+    # ensure_channel()'s internal one (which always includes
+    # radiod_host=self.status_address).  Without this, the test's local
+    # ssrc and ensure_channel's internal ssrc DIVERGE — the channel is
+    # created at SSRC_internal, but the `finally`-block cleanup falls
+    # back to SSRC_local when discovery doesn't match, leaving zombie
+    # channels on radiod that break subsequent runs.
     ssrc = allocate_ssrc(
         frequency_hz=test_case.frequency_hz,
         preset=test_case.preset,
         sample_rate=test_case.sample_rate,
         agc=bool(test_case.agc_enable),
         gain=test_case.gain,
-        destination=client_ip
+        destination=client_ip,
+        radiod_host=control.status_address,
     )
     
     result = VerificationResult(
@@ -689,11 +703,12 @@ def verify_channel(
         # Add encoding if specified
         if test_case.encoding is not None:
             ensure_kwargs['encoding'] = test_case.encoding
-        
-        # Add destination if specified
-        if test_case.destination is not None:
-            ensure_kwargs['destination'] = test_case.destination
-            
+
+        # NOTE: destination is already resolved into ensure_kwargs above
+        # (test_case.destination takes precedence over the derived
+        # client_ip).  Don't override here — the SSRC was computed from
+        # the resolved value so they must agree.
+
         try:
             # ensure_channel returns the discovered ChannelInfo
             channel_info = control.ensure_channel(**ensure_kwargs)
@@ -1029,6 +1044,62 @@ def control(radiod_address):
     ctrl = RadiodControl(radiod_address)
     yield ctrl
     ctrl.close()
+
+
+def _test_case_ssrcs(control):
+    """Compute the SSRCs that every TEST_CASE will claim on this radiod.
+
+    Mirrors verify_channel()'s allocate_ssrc() call so we can recognize
+    leftover test channels from earlier runs without having to scan
+    radiod's full channel list heuristically.
+    """
+    from ka9q.addressing import generate_multicast_ip
+    ssrcs = set()
+    for tc in TEST_CASES:
+        if tc.destination is not None:
+            client_ip = tc.destination
+        else:
+            uid = f"{tc.frequency_hz}_{tc.preset}_{tc.sample_rate}"
+            client_ip = generate_multicast_ip(uid)
+        ssrcs.add(allocate_ssrc(
+            frequency_hz=tc.frequency_hz,
+            preset=tc.preset,
+            sample_rate=tc.sample_rate,
+            agc=bool(tc.agc_enable),
+            gain=tc.gain,
+            destination=client_ip,
+            radiod_host=control.status_address,
+        ))
+    return ssrcs
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _purge_test_channel_zombies(control):
+    """Defensively remove leftover test channels at module entry and exit.
+
+    Earlier versions of this test file had a SSRC-divergence bug
+    (test computed SSRC without radiod_host=, ensure_channel computed
+    SSRC with it) that leaked channels on every failure path.  Even
+    after that fix, a defensive pre-cleanup makes the suite resilient
+    to ad-hoc manual runs against the same radiod, and a post-cleanup
+    backstops any future leak we haven't anticipated.
+    """
+    def _purge(when: str):
+        try:
+            target_ssrcs = _test_case_ssrcs(control)
+            existing = discover_channels(control.status_address, listen_duration=2.0)
+            for ssrc in target_ssrcs & set(existing.keys()):
+                try:
+                    control.remove_channel(ssrc)
+                    logger.info(f"{when}: purged leftover test channel SSRC {ssrc}")
+                except Exception as exc:
+                    logger.warning(f"{when}: failed to purge SSRC {ssrc}: {exc}")
+        except Exception as exc:
+            logger.warning(f"{when}: zombie purge skipped: {exc}")
+
+    _purge("pre-test")
+    yield
+    _purge("post-test")
 
 
 class TestChannelVerification:
