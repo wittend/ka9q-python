@@ -16,7 +16,7 @@ uv sync --extra dev                    # standard; creates .venv/
 
 ### Run tests
 ```bash
-# All tests (unit tests run without a live radiod)
+# All tests (~375 collected; unit tests run without a live radiod)
 uv run pytest
 
 # Integration tests against a live radiod host
@@ -24,8 +24,10 @@ uv run pytest --radiod-host=bee1-hf-status.local
 # or via environment variable
 RADIOD_HOST=bee1-hf-status.local uv run pytest
 
-# Single test file
+# Single test file / one test
 uv run pytest tests/test_control.py -v
+uv run pytest tests/test_control.py::TestClass::test_X
+uv run pytest -k addressing -v                # by keyword
 
 # With coverage
 uv run pytest --cov=ka9q --cov-report=html
@@ -44,13 +46,15 @@ downstream consumers. Clients pin ka9q-python via their own `uv.lock`.
 
 ### Abstraction Layers
 
-The library exposes three progressively higher-level abstractions for consuming RTP audio streams:
+The library exposes four progressively higher-level abstractions for consuming RTP audio streams:
 
 1. **`RTPRecorder`** (`rtp_recorder.py`) — Low-level raw packet capture with precise GPS/RTP timestamps. Use when timing accuracy is critical (e.g., WSPR, scientific measurement).
 
 2. **`RadiodStream`** (`stream.py`) — Mid-level continuous sample delivery with automatic gap filling. Built on `PacketResequencer` (`resequencer.py`) for out-of-order packet handling.
 
 3. **`ManagedStream`** (`managed_stream.py`) — High-level self-healing wrapper around `RadiodStream` that automatically recovers from radiod restarts and network interruptions.
+
+4. **`MultiStream`** (`multi_stream.py`) — Multi-channel multiplexer: one socket per multicast group, demultiplexes by SSRC across many channels. This is the substrate every sigmond recorder uses (psk-recorder, wspr-recorder, hfdl-recorder, codar-sounder) because radiod publishes many bands into one multicast group and a per-channel socket would over-subscribe the kernel.
 
 ### Core Components
 
@@ -117,9 +121,11 @@ Operator workflow when the watcher is yellow/red:
    expose the new capability, then `sync_types.py --apply` to regenerate
    `types.py` and advance the pin.
 3. For *removed* or *value-shifted* critical fields: coordinate with
-   downstream clients (hf-timestd, wspr-recorder, wsprdaemon-client,
-   psk-recorder) *before* regenerating, since they hard-code enum names
-   and values via `from ka9q.types import StatusType, Encoding`.
+   downstream sigmond-suite clients (hf-timestd, wspr-recorder,
+   psk-recorder, hfdl-recorder, codar-sounder) *before* regenerating,
+   since they hard-code enum names and values via
+   `from ka9q.types import StatusType, Encoding`. (wsprdaemon-client
+   is deprecated; no longer a coordination concern.)
 4. After `--apply`: run `pytest`, then commit `types.py`,
    `ka9q_radio_compat`, and `ka9q/compat.py` together.
 
