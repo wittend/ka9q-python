@@ -72,7 +72,15 @@ class ChannelInfo:
     # waiting for its own projection to drift past a divergence gate.
     anchor_epoch: int = 0  # increments each time a stepped offset is adopted
     last_offset_step_sec: Optional[float] = None  # magnitude of the last step (diagnostic)
-    anchor_step_threshold_sec: float = 0.25  # |move| beyond this ⇒ a step (configurable)
+    # 0.75s: catches a genuine catastrophic step (bee1's mid-session +1.5s
+    # RTP glitch) while tolerating the benign, self-recovering output jitter of
+    # a busy radiod whose many channel-threads contend for few cores (B4's
+    # 36-channel radiod on 2 cores stalls output ~0.25–0.31s intermittently).
+    # 0.27s is well within wsprd's ~2s tolerance, so re-anchoring (which
+    # discards the in-progress WSPR window and re-captures an overlapping slot
+    # → cross-batch duplicate uploads) does more harm than tolerating it. The
+    # per-band abs-divergence check remains the backstop for real sustained drift.
+    anchor_step_threshold_sec: float = 0.75  # |move| beyond this ⇒ a step (configurable)
 
     def __post_init__(self):
         # Seed the atomic-pair snapshot from the constructor args if both
