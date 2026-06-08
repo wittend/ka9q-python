@@ -1715,11 +1715,14 @@ class RadiodControl:
         )
         logger.info(f"ensure_channel: computed SSRC {ssrc} for {frequency_hz/1e6:.3f} MHz {preset} dest={destination} enc={encoding} radiod={self.status_address}")
         
-        # Check if channel already exists with matching parameters
-        existing_channels = discover_channels(self.status_address, listen_duration=1.0)
-        
-        if ssrc in existing_channels:
-            existing = existing_channels[ssrc]
+        # Check if channel already exists with matching parameters.  Targeted
+        # O(1) poll instead of a full discover_channels() sweep: poll_channel
+        # returns the channel only when it is present at our frequency.
+        existing = self.poll_channel(
+            ssrc, expected_freq=frequency_hz,
+            timeout=1.0, frequency_tolerance=frequency_tolerance,
+        )
+        if existing is not None:
             # Verify existing channel meets specs
             if abs(existing.frequency - frequency_hz) <= frequency_tolerance:
                 if existing.sample_rate == sample_rate:
@@ -1800,60 +1803,39 @@ class RadiodControl:
             kaiser_beta=kaiser_beta,
         )
         
-        # Wait for channel to appear and verify it meets specs
-        start_time = time.time()
-        verify_interval = 0.5  # Check every 500ms
-        
-        while time.time() - start_time < timeout:
-            # Give radiod time to process the command
-            time.sleep(verify_interval)
-            
-            # Discover channels and look for ours
-            channels = discover_channels(self.status_address, listen_duration=1.0)
-            
-            if ssrc in channels:
-                channel = channels[ssrc]
-                
-                # Verify frequency
-                freq_ok = abs(channel.frequency - frequency_hz) <= frequency_tolerance
-                # Verify sample rate
-                rate_ok = channel.sample_rate == sample_rate
-                # Verify preset (case-insensitive)
-                preset_ok = channel.preset.lower() == preset.lower()
-                # Verify destination if requested
-                dest_ok = True
-                if destination:
-                     # Check if destination IP is present in channel's multicast address
-                     # (Allows for port differences or hostname resolution)
-                     dest_ok = destination in (channel.multicast_address or "")
-                
-                if freq_ok and rate_ok and preset_ok and dest_ok:
-                    logger.info(
-                        f"ensure_channel: verified channel SSRC {ssrc} - "
-                        f"{channel.frequency/1e6:.3f} MHz, {channel.preset}, "
-                        f"{channel.sample_rate} Hz"
-                    )
-                    return channel
-                else:
-                    # Channel exists but doesn't match - log details
-                    issues = []
-                    if not freq_ok:
-                        issues.append(f"freq={channel.frequency/1e6:.3f} (want {frequency_hz/1e6:.3f})")
-                    if not rate_ok:
-                        issues.append(f"rate={channel.sample_rate} (want {sample_rate})")
-                    if not preset_ok:
-                        issues.append(f"preset={channel.preset} (want {preset})")
-                    if not dest_ok:
-                        issues.append(f"dest={channel.multicast_address} (want {destination})")
-                    logger.debug(f"ensure_channel: channel mismatch: {', '.join(issues)}")
-            
-            # Increase interval with backoff (cap at 1s)
-            verify_interval = min(verify_interval * 1.5, 1.0)
-        
-        raise TimeoutError(
-            f"Channel SSRC {ssrc} not verified within {timeout}s. "
-            f"Requested: {frequency_hz/1e6:.3f} MHz, {preset}, {sample_rate} Hz"
+        # Confirm the channel landed via one targeted O(1) poll.  This was a
+        # looped discover_channels() sweep (O(total channels), re-listing every
+        # channel each iteration) which stalled badly on a busy shared radiod —
+        # a per-channel verify couldn't catch its one status in the 1 s window
+        # and timed out even though radiod had created the channel.  Liveness
+        # after establishment is judged from the RTP data plane by the stream
+        # classes, not by more polling.
+        channel = self.poll_channel(
+            ssrc, expected_freq=frequency_hz,
+            timeout=timeout, frequency_tolerance=frequency_tolerance,
         )
+        if channel is None:
+            raise TimeoutError(
+                f"Channel SSRC {ssrc} not verified within {timeout}s. "
+                f"Requested: {frequency_hz/1e6:.3f} MHz, {preset}, {sample_rate} Hz"
+            )
+        # radiod may grant a different encoding (e.g. F32->S16 for some IQ
+        # configs); the returned ChannelInfo carries the granted value, which
+        # consumers use authoritatively.  A rate/preset divergence is logged
+        # but not fatal — the channel exists at the requested frequency.
+        if (channel.sample_rate != sample_rate
+                or channel.preset.lower() != preset.lower()):
+            logger.warning(
+                "ensure_channel: SSRC %s granted rate=%s preset=%s "
+                "(requested rate=%s preset=%s)",
+                ssrc, channel.sample_rate, channel.preset, sample_rate, preset,
+            )
+        logger.info(
+            f"ensure_channel: verified channel SSRC {ssrc} - "
+            f"{channel.frequency/1e6:.3f} MHz, {channel.preset}, "
+            f"{channel.sample_rate} Hz"
+        )
+        return channel
     
     def remove_channel(self, ssrc: int):
         """
