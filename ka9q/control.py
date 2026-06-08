@@ -21,6 +21,7 @@ PARAMETERS:
 """
 
 import socket
+import select
 import struct
 import secrets
 import logging
@@ -1480,7 +1481,101 @@ class RadiodControl:
         
         logger.info(f"Channel {ssrc} verified: {channel.frequency/1e6:.3f} MHz, {channel.preset}")
         return True
-    
+
+    def poll_channel(self, ssrc: int, expected_freq: Optional[float] = None,
+                     timeout: float = 2.0, frequency_tolerance: float = 1.0):
+        """Targeted status poll for a single channel — O(1), not O(channels).
+
+        Sends a poll naming exactly this ``ssrc`` and returns the ChannelInfo
+        from the first *matching* STATUS reply, or ``None`` on timeout.  Unlike
+        :func:`discover_channels` (a fixed-window listen that parses *every*
+        channel), this asks radiod for one channel and returns the moment its
+        status lands, so cost is independent of how many channels radiod runs.
+
+        radiod answers a poll for an unknown SSRC with an *empty* status
+        (frequency 0) rather than silence, so "a reply arrived" does not prove
+        the channel exists.  Pass ``expected_freq`` and a reply is accepted
+        only when its frequency matches within ``frequency_tolerance``; empty
+        or stale replies are skipped and the poll is re-sent until the real
+        status appears or the timeout elapses.  With no ``expected_freq`` an
+        obviously-empty reply (frequency 0) is rejected.
+
+        This is the establishment/verify probe: after ``create_channel`` sends
+        the create, one ``poll_channel(ssrc, expected_freq=f)`` confirms radiod
+        accepted it and yields the *granted* encoding + RTP_TIMESNAP/GPS_TIME
+        timing anchor the data path needs.  Liveness thereafter is judged from
+        the RTP data plane, not from repeated polling.
+        """
+        _validate_ssrc(ssrc)
+        from .discovery import ChannelInfo, _create_status_listener_socket
+
+        multicast_addr = resolve_multicast_address(self.status_address, timeout=2.0)
+
+        cmd = bytearray()
+        cmd.append(CMD)
+        encode_int(cmd, StatusType.COMMAND_TAG, secrets.randbits(31))
+        encode_int(cmd, StatusType.OUTPUT_SSRC, ssrc)
+        encode_eol(cmd)
+
+        sock = _create_status_listener_socket(multicast_addr, None)
+        try:
+            deadline = time.time() + timeout
+            next_poll = 0.0
+            while True:
+                now = time.time()
+                if now >= deadline:
+                    return None
+                # (Re)send the poll periodically so a just-created channel is
+                # caught promptly even if radiod's first broadcast was missed.
+                if now >= next_poll:
+                    try:
+                        sock.sendto(bytes(cmd), (multicast_addr, 5006))
+                    except OSError as exc:
+                        logger.debug("poll_channel: send failed for SSRC %s: %s", ssrc, exc)
+                        return None
+                    next_poll = now + 0.5
+                ready = select.select([sock], [], [], min(0.25, max(0.0, deadline - now)))
+                if not ready[0]:
+                    continue
+                try:
+                    buffer, _ = sock.recvfrom(8192)
+                except OSError:
+                    continue
+                if not buffer or buffer[0] != 0:   # STATUS packets carry type byte 0
+                    continue
+                try:
+                    status = self._decode_status_response(buffer)
+                except Exception:
+                    continue
+                if status.get("ssrc") != ssrc:
+                    continue
+                freq = status.get("frequency", 0.0) or 0.0
+                if expected_freq is not None:
+                    if abs(freq - expected_freq) > frequency_tolerance:
+                        continue   # empty or stale reply — keep waiting
+                elif not freq:
+                    continue       # radiod's "no such channel" empty status
+                dest = status.get("destination", {})
+                mcast = dest.get("address", "") if isinstance(dest, dict) else ""
+                port = dest.get("port", 0) if isinstance(dest, dict) else 0
+                return ChannelInfo(
+                    ssrc=ssrc,
+                    preset=status.get("preset", "unknown"),
+                    sample_rate=status.get("sample_rate", 0),
+                    frequency=freq,
+                    snr=status.get("snr", float("-inf")),
+                    multicast_address=mcast,
+                    port=port,
+                    gps_time=status.get("gps_time"),
+                    rtp_timesnap=status.get("rtp_timesnap"),
+                    encoding=status.get("encoding", 0),
+                )
+        finally:
+            try:
+                sock.close()
+            except Exception:
+                pass
+
     def ensure_channel(
         self,
         frequency_hz: float,
