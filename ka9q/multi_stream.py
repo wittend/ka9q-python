@@ -237,6 +237,52 @@ class MultiStream:
         )
         return channel_info
 
+    def prune_frequency(
+        self, frequency_hz: float, keep_ssrc: Optional[int] = None
+    ) -> List[int]:
+        """Release every slot on ``frequency_hz`` except ``keep_ssrc``.
+
+        A client that re-provisions a band (``add_channel`` again after the
+        old channel went stale) gets a fresh SSRC and a fresh per-channel
+        callback (which, for wspr-recorder, transitively holds a multi-MB
+        decoder ring buffer).  The superseded slot for that frequency would
+        otherwise linger in ``_slots`` forever, holding its ``on_samples``
+        closure — and thus the old ring — alive.  Over a flaky radiod that
+        re-provisions continuously this leaks ~GB/hour.  Call this right
+        after the replacement ``add_channel`` to drop the old slot(s).
+
+        Matching is by frequency, not SSRC, so it also catches a slot the
+        health monitor autonomously re-keyed (``_attempt_restore``) to an
+        SSRC the caller never recorded.  Returns the removed SSRCs.
+
+        Thread-safety: ``_slots`` is mutated only by atomic ``pop`` over a
+        ``list()`` snapshot; the receive thread reads via atomic ``get`` and
+        the health monitor iterates its own ``list()`` snapshot, so this is
+        safe to call from any thread without a lock.  Heavy references on a
+        removed slot are also nulled so the ring is freed even if the monitor
+        had snapshotted the slot and resurrects an (empty) entry for it.
+        """
+        removed: List[int] = []
+        for ssrc, slot in list(self._slots.items()):
+            if ssrc == keep_ssrc:
+                continue
+            if abs(slot.frequency_hz - frequency_hz) > 1.0:
+                continue
+            self._slots.pop(ssrc, None)
+            slot.on_samples = None
+            slot.on_stream_dropped = None
+            slot.on_stream_restored = None
+            slot.sample_buffer.clear()
+            slot.gap_buffer.clear()
+            removed.append(ssrc)
+        if removed:
+            logger.info(
+                f"MultiStream: pruned {len(removed)} superseded slot(s) "
+                f"on {frequency_hz/1e6:.3f} MHz (SSRCs={removed}, "
+                f"kept={keep_ssrc})"
+            )
+        return removed
+
     def start(self) -> None:
         """Open the shared socket and start receive + health threads."""
         if self._running:
